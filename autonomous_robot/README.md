@@ -184,7 +184,8 @@ sudo usermod -a -G dialout $USER
 ```
 autonomous_robot/
 │
-├── 📄 run_line_follower.py     # Entry point chính
+├── 📄 run_line_follower.py     # Entry point - Line Following
+├── 📄 run_patrol.py            # ⭐ Entry point - Tuần tra giám sát
 ├── 📄 requirements.txt         # Dependencies
 │
 ├── 📁 configs/                 # CẤU HÌNH
@@ -587,21 +588,35 @@ python tools/calibration/terrain_obstacle_calibration.py
 # 3. Test (tùy chọn)
 python tools/testing/test_terrain_analyzer.py --mock-uart
 
-# 4. Run!
+# 4. Run Line Following
 python run_line_follower.py
+
+# 5. Run Patrol Surveillance
+python run_patrol.py
 ```
 
-### Command Line Arguments
+### Chạy Line Following
 
 ```bash
 python run_line_follower.py [OPTIONS]
 
 Options:
   --mock-uart       Sử dụng mock UART (không cần hardware)
-  --no-uart         Không sử dụng UART
   --no-viz          Không hiển thị GUI
   --debug           Enable debug logging
-  --config FILE     Sử dụng file config custom
+```
+
+### Chạy Patrol Surveillance
+
+```bash
+python run_patrol.py [OPTIONS]
+
+Options:
+  --mock-uart       Sử dụng mock UART (không cần hardware)
+  --no-uart         Không sử dụng UART (chỉ camera)
+  --no-viz          Không hiển thị GUI
+  --debug           Enable debug logging
+  --port PORT       UART port (default: /dev/ttyACM0)
 ```
 
 ### Keyboard Controls (khi chạy)
