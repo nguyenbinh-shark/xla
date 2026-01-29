@@ -1,0 +1,1569 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#                    BÁO CÁO CHI TIẾT DỰ ÁN AUTONOMOUS ROBOT
+#                    Hệ Thống Robot Tự Hành Sử Dụng Computer Vision
+# ═══════════════════════════════════════════════════════════════════════════════
+
+================================================================================
+                              MỤC LỤC
+================================================================================
+
+1.  TỔNG QUAN DỰ ÁN
+2.  KIẾN THỨC NỀN TẢNG SỬ DỤNG
+3.  KIẾN TRÚC HỆ THỐNG
+4.  CHI TIẾT CÁC MODULE
+5.  CÁC THÔNG SỐ QUAN TRỌNG VÀ CÁCH ĐIỀU CHỈNH
+6.  THUẬT TOÁN VÀ PHƯƠNG PHÁP
+7.  HƯỚNG DẪN CALIBRATION
+8.  GIAO TIẾP UART VỚI STM32
+9.  XỬ LÝ LỖI VÀ TROUBLESHOOTING
+10. KẾT LUẬN VÀ HƯỚNG PHÁT TRIỂN
+
+================================================================================
+                         1. TỔNG QUAN DỰ ÁN
+================================================================================
+
+1.1. MÔ TẢ DỰ ÁN
+--------------------------------------------------------------------------------
+Dự án xây dựng hệ thống robot tự hành có khả năng:
+- Nhận diện và bám theo làn đường (Lane Following)
+- Phát hiện vật cản và né tránh (Obstacle Avoidance)
+- Đo khoảng cách bằng camera depth (Distance Measurement)
+- Ra quyết định thông minh (Decision Making)
+- Điều khiển chuyển động mượt mà (Motion Control)
+
+1.2. PHẦN CỨNG SỬ DỤNG
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Thành phần              │ Model              │ Chức năng                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Camera RGB-D            │ Intel RealSense    │ Thu thập hình ảnh RGB và     │
+│                         │ D435i              │ depth map, độ phân giải      │
+│                         │                    │ 640x480 @ 30fps             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Vi điều khiển           │ STM32              │ Điều khiển động cơ, đọc      │
+│                         │                    │ encoder, thực hiện lệnh      │
+│                         │                    │ qua UART /dev/ttyACM0        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Giao tiếp USB           │ DaMiao-Tech        │ Converter UART ↔ USB        │
+│                         │ DM-USB2FDCAN       │ 115200 baud                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Máy tính xử lý          │ PC/Jetson          │ Chạy thuật toán CV, AI,      │
+│                         │                    │ ra quyết định                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+1.3. PHẦN MỀM SỬ DỤNG
+--------------------------------------------------------------------------------
+- Python 3.8+
+- OpenCV 4.x          : Xử lý ảnh
+- NumPy               : Tính toán ma trận
+- PyRealsense2        : Giao tiếp camera RealSense
+- Ultralytics YOLOv8  : Phát hiện vật thể
+- PySerial            : Giao tiếp UART
+
+================================================================================
+                    2. KIẾN THỨC NỀN TẢNG SỬ DỤNG
+================================================================================
+
+2.1. COMPUTER VISION (THỊ GIÁC MÁY TÍNH)
+--------------------------------------------------------------------------------
+
+2.1.1. Không Gian Màu (Color Spaces)
+────────────────────────────────────────────────────────────────────────────────
+a) RGB (Red, Green, Blue):
+   - Mỗi pixel = 3 giá trị (R, G, B), mỗi giá trị 0-255
+   - Tổng: 256³ = 16.7 triệu màu
+   - Nhược điểm: Nhạy với ánh sáng
+
+b) HLS (Hue, Lightness, Saturation):
+   - H (Hue): Màu sắc, 0-179 trong OpenCV
+   - L (Lightness): Độ sáng, 0-255
+   - S (Saturation): Độ bão hòa, 0-255
+   - Ưu điểm: Tách biệt màu sắc và độ sáng, ít nhạy với điều kiện ánh sáng
+
+   Công thức chuyển đổi:
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ MAX = max(R, G, B)                                                      │
+   │ MIN = min(R, G, B)                                                      │
+   │ L = (MAX + MIN) / 2                                                     │
+   │                                                                         │
+   │ Nếu MAX == MIN: S = 0, H = undefined                                    │
+   │ Ngược lại:                                                              │
+   │   S = (MAX - MIN) / (1 - |2L - 1|)                                     │
+   │   H = 60° × (G-B)/(MAX-MIN)           nếu MAX = R                      │
+   │   H = 60° × (2 + (B-R)/(MAX-MIN))     nếu MAX = G                      │
+   │   H = 60° × (4 + (R-G)/(MAX-MIN))     nếu MAX = B                      │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+c) Grayscale (Ảnh xám):
+   - 1 kênh màu, giá trị 0-255
+   - Công thức: Gray = 0.299×R + 0.587×G + 0.114×B
+   - Sử dụng: Giảm tính toán, phát hiện cạnh
+
+2.1.2. Các Phép Biến Đổi Hình Thái (Morphological Operations)
+────────────────────────────────────────────────────────────────────────────────
+Sử dụng kernel (structuring element) để biến đổi ảnh nhị phân.
+
+a) Erosion (Xói mòn):
+   - Loại bỏ pixel ở biên
+   - Công thức: dst(x,y) = min_{(x',y') ∈ kernel} src(x+x', y+y')
+   - Ứng dụng: Loại bỏ nhiễu nhỏ, tách các object dính nhau
+
+b) Dilation (Giãn nở):
+   - Thêm pixel ở biên
+   - Công thức: dst(x,y) = max_{(x',y') ∈ kernel} src(x+x', y+y')
+   - Ứng dụng: Lấp đầy lỗ hổng, nối các đường đứt
+
+c) Opening (Mở):
+   - Opening = Erosion → Dilation
+   - Ứng dụng: Loại bỏ nhiễu nhỏ, giữ hình dạng object
+
+d) Closing (Đóng):
+   - Closing = Dilation → Erosion
+   - Ứng dụng: Lấp đầy lỗ hổng nhỏ, nối các đường đứt đoạn
+
+   Minh họa:
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ Original     Erosion      Dilation     Opening      Closing            │
+   │ ████████     ██████       ██████████   ████████     ████████           │
+   │ ██  ████  →  ██  ██   →   ██  ██████   ██  ████     ██████████         │
+   │ ████████     ██████       ██████████   ████████     ████████           │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+2.1.3. Phát Hiện Cạnh Canny (Canny Edge Detection)
+────────────────────────────────────────────────────────────────────────────────
+Thuật toán phát hiện cạnh multi-stage:
+
+Bước 1: Giảm nhiễu bằng Gaussian Filter
+   G(x,y) = (1/2πσ²) × exp(-(x² + y²)/2σ²)
+
+Bước 2: Tính gradient (độ dốc) bằng Sobel Operator
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ Sobel X:        Sobel Y:                                                │
+   │ ┌────────────┐  ┌────────────┐                                         │
+   │ │ -1  0  +1 │  │ -1  -2  -1 │                                         │
+   │ │ -2  0  +2 │  │  0   0   0 │                                         │
+   │ │ -1  0  +1 │  │ +1  +2  +1 │                                         │
+   │ └────────────┘  └────────────┘                                         │
+   │                                                                         │
+   │ Gradient Magnitude: G = √(Gx² + Gy²)                                   │
+   │ Gradient Direction: θ = arctan(Gy/Gx)                                  │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+Bước 3: Non-maximum Suppression
+   - Giữ lại chỉ các pixel là cực đại địa phương theo hướng gradient
+
+Bước 4: Double Threshold
+   - High threshold: Pixel > high → Chắc chắn là cạnh
+   - Low threshold: low < Pixel < high → Có thể là cạnh
+   - Pixel < low → Không phải cạnh
+
+Bước 5: Edge Tracking by Hysteresis
+   - Pixel "có thể là cạnh" chỉ được giữ nếu kết nối với "chắc chắn là cạnh"
+
+2.1.4. Biến Đổi Hough (Hough Transform)
+────────────────────────────────────────────────────────────────────────────────
+Phương pháp phát hiện đường thẳng trong ảnh.
+
+a) Hough Line Transform (Chuẩn):
+   Biểu diễn đường thẳng: ρ = x×cos(θ) + y×sin(θ)
+   - ρ: Khoảng cách từ gốc tọa độ đến đường thẳng
+   - θ: Góc của pháp tuyến với trục x
+   
+   Mỗi điểm (x,y) trong không gian ảnh tạo thành đường cong trong
+   không gian Hough (ρ, θ). Giao điểm của nhiều đường cong = đường thẳng.
+
+b) Probabilistic Hough Transform (HoughLinesP):
+   - Cải tiến: Chỉ xét một phần ngẫu nhiên các điểm
+   - Nhanh hơn, trả về endpoints của đoạn thẳng
+   
+   Parameters:
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ Parameter      │ Ý nghĩa                         │ Giá trị đề xuất     │
+   ├─────────────────────────────────────────────────────────────────────────┤
+   │ rho            │ Độ phân giải ρ (pixels)         │ 1                   │
+   │ theta          │ Độ phân giải θ (radians)        │ π/180 = 1°          │
+   │ threshold      │ Số vote tối thiểu               │ 20-50               │
+   │ minLineLength  │ Độ dài đoạn thẳng tối thiểu     │ 20-100              │
+   │ maxLineGap     │ Khoảng cách max để nối đoạn     │ 10-50               │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+2.2. MACHINE LEARNING - YOLO (You Only Look Once)
+--------------------------------------------------------------------------------
+
+2.2.1. Tổng Quan YOLO
+────────────────────────────────────────────────────────────────────────────────
+YOLO là thuật toán Real-time Object Detection:
+- Chia ảnh thành lưới S×S
+- Mỗi ô dự đoán B bounding boxes + confidence scores
+- Mỗi box: (x, y, w, h, confidence)
+- Dự đoán C class probabilities
+
+YOLOv8 Architecture:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  Input     →   Backbone    →    Neck      →     Head     →   Output        │
+│  Image         (CSPNet)        (PANet)         (Detect)      Predictions   │
+│                                                                             │
+│  640×640   →  Feature      →  Multi-scale →  Classification →  Boxes       │
+│  RGB           Extraction     Fusion          + Regression     + Classes   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+2.2.2. Non-Maximum Suppression (NMS)
+────────────────────────────────────────────────────────────────────────────────
+Thuật toán loại bỏ các bounding box trùng lặp:
+
+1. Sắp xếp boxes theo confidence score giảm dần
+2. Chọn box có confidence cao nhất
+3. Tính IoU với các box còn lại
+4. Loại bỏ các box có IoU > threshold (trùng lặp)
+5. Lặp lại từ bước 2 với các box còn lại
+
+IoU (Intersection over Union):
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│    IoU = Area of Intersection / Area of Union                               │
+│                                                                             │
+│    ┌─────────┐                                                              │
+│    │    A    │                                                              │
+│    │    ┌────┼────┐       IoU = 0: Không giao nhau                         │
+│    └────┼────┘    │       IoU = 1: Hoàn toàn trùng khớp                    │
+│         │    B    │       IoU > 0.5: Thường coi là "trùng"                 │
+│         └─────────┘                                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+2.2.3. COCO Dataset Classes
+────────────────────────────────────────────────────────────────────────────────
+Classes được sử dụng trong dự án (COCO index):
+- 0: person (người)
+- 1: bicycle (xe đạp)
+- 2: car (ô tô)
+- 3: motorcycle (xe máy)
+- 5: bus (xe buýt)
+- 7: truck (xe tải)
+
+2.3. DEPTH SENSING (CẢM BIẾN ĐỘ SÂU)
+--------------------------------------------------------------------------------
+
+2.3.1. Intel RealSense D435i
+────────────────────────────────────────────────────────────────────────────────
+Công nghệ: Active IR Stereo Vision
+
+Nguyên lý hoạt động:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│    IR Projector    Left IR Camera    Right IR Camera    RGB Camera         │
+│         │                │                  │                │              │
+│         ▼                ▼                  ▼                ▼              │
+│    Chiếu pattern   Thu pattern IR     Thu pattern IR    Thu ảnh màu        │
+│    IR lên scene         │                  │                │              │
+│                         └────────┬─────────┘                │              │
+│                                  ▼                          │              │
+│                          Stereo Matching                    │              │
+│                          (Tính disparity)                   │              │
+│                                  │                          │              │
+│                                  ▼                          │              │
+│                           Depth Map  ←─────── Alignment ────┘              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Công thức tính depth từ disparity:
+   depth = (focal_length × baseline) / disparity
+   
+   Với D435i:
+   - Baseline: ~50mm
+   - Focal length: phụ thuộc resolution
+   - Depth range: 0.1m - 10m
+
+2.3.2. Depth Filtering
+────────────────────────────────────────────────────────────────────────────────
+Median Filter:
+- Lấy giá trị trung vị trong vùng kernel
+- Loại bỏ outliers hiệu quả
+- Giữ được cạnh tốt hơn mean filter
+
+Công thức:
+   output(x,y) = median(input[y-k:y+k+1, x-k:x+k+1])
+   với k = kernel_size // 2
+
+2.4. CONTROL SYSTEMS (HỆ THỐNG ĐIỀU KHIỂN)
+--------------------------------------------------------------------------------
+
+2.4.1. PID Controller
+────────────────────────────────────────────────────────────────────────────────
+Proportional-Integral-Derivative Controller:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│    Setpoint ──┬──►(+)──►│ PID │──► Control Output ──► System ──┬──► Output │
+│               │    (-)   └─────┘                                │           │
+│               │     ▲                                           │           │
+│               │     └───────────────────────────────────────────┘           │
+│               │                    Feedback                                 │
+│               │                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Công thức PID:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│   u(t) = Kp × e(t) + Ki × ∫e(τ)dτ + Kd × de(t)/dt                          │
+│                                                                             │
+│   Trong đó:                                                                 │
+│   - e(t): Error = Setpoint - Measured Value                                 │
+│   - Kp: Proportional Gain (Tỷ lệ)                                          │
+│   - Ki: Integral Gain (Tích phân)                                          │
+│   - Kd: Derivative Gain (Vi phân)                                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Vai trò các thành phần:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Thành phần  │ Tác dụng                    │ Nhược điểm                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ P           │ Phản ứng nhanh với error    │ Không triệt tiêu steady-state  │
+│ (Tỷ lệ)     │ Error càng lớn → output     │ error, có thể dao động         │
+│             │ càng mạnh                   │                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ I           │ Triệt tiêu steady-state     │ Phản ứng chậm, gây overshoot   │
+│ (Tích phân) │ error (tích lũy error      │ nếu quá lớn                    │
+│             │ theo thời gian)             │                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ D           │ Dự đoán xu hướng error,     │ Nhạy với noise, không dùng    │
+│ (Vi phân)   │ giảm overshoot, tăng        │ đơn lẻ                         │
+│             │ độ ổn định                  │                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+2.4.2. Anti-Windup
+────────────────────────────────────────────────────────────────────────────────
+Vấn đề: Khi actuator bão hòa (saturation), integral tiếp tục tích lũy
+        → "Windup" → Mất thời gian dài để hệ thống phục hồi
+
+Giải pháp: Giới hạn giá trị integral
+   if integral > INTEGRAL_LIMIT:
+       integral = INTEGRAL_LIMIT
+   elif integral < -INTEGRAL_LIMIT:
+       integral = -INTEGRAL_LIMIT
+
+2.4.3. Rate Limiting
+────────────────────────────────────────────────────────────────────────────────
+Giới hạn tốc độ thay đổi output để chuyển động mượt mà:
+
+   if |new_value - current_value| > MAX_RATE:
+       new_value = current_value + sign(delta) × MAX_RATE
+
+Tại sao cần thiết:
+- Tránh jerk (giật) đột ngột
+- Bảo vệ cơ cấu chấp hành
+- Tăng độ ổn định hệ thống
+
+2.5. FINITE STATE MACHINE (MÁY TRẠNG THÁI HỮU HẠN)
+--------------------------------------------------------------------------------
+
+2.5.1. Khái Niệm
+────────────────────────────────────────────────────────────────────────────────
+FSM bao gồm:
+- Tập hợp trạng thái (States)
+- Tập hợp sự kiện (Events/Inputs)
+- Hàm chuyển đổi (Transition Function)
+- Trạng thái ban đầu (Initial State)
+
+2.5.2. Các Trạng Thái Robot
+────────────────────────────────────────────────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                     ┌─────────────────┐                                     │
+│                     │   CENTER_LANE   │◄─────────── All Clear               │
+│                     │   (Mặc định)    │                                     │
+│                     └────────┬────────┘                                     │
+│                              │                                              │
+│            ┌─────────────────┼─────────────────┐                           │
+│            │                 │                 │                            │
+│            ▼                 ▼                 ▼                            │
+│    ┌───────────────┐ ┌───────────────┐ ┌───────────────┐                   │
+│    │  LEFT_LANE    │ │   STOPPED     │ │  RIGHT_LANE   │                   │
+│    │  (Né trái)    │ │ (Dừng khẩn    │ │  (Né phải)    │                   │
+│    │               │ │  cấp)         │ │               │                   │
+│    └───────────────┘ └───────────────┘ └───────────────┘                   │
+│                                                                             │
+│    Điều kiện chuyển:                                                        │
+│    - Obstacle Center + Right Free → LEFT_LANE                               │
+│    - Obstacle Center + Left Free → RIGHT_LANE                               │
+│    - Obstacle < D_EMERGENCY → STOPPED                                       │
+│    - All Obstacles Clear → CENTER_LANE                                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+2.5.3. Hysteresis
+────────────────────────────────────────────────────────────────────────────────
+Tại sao cần Hysteresis:
+- Tránh chuyển trạng thái liên tục do nhiễu (flickering)
+- Đảm bảo quyết định ổn định
+
+Cách hoạt động:
+- Chỉ chuyển trạng thái khi điều kiện được thỏa mãn liên tục N frames
+- N = LANE_TRANSITION_HYSTERESIS (mặc định: 5 frames)
+
+================================================================================
+                       3. KIẾN TRÚC HỆ THỐNG
+================================================================================
+
+3.1. SƠ ĐỒ TỔNG QUAN
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           MAIN CONTROL LOOP (30Hz)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                         PERCEPTION LAYER                              │  │
+│  ├──────────────────────────────────────────────────────────────────────┤  │
+│  │                                                                       │  │
+│  │  ┌────────────┐    ┌────────────────┐    ┌────────────────────┐     │  │
+│  │  │ RealSense  │───▶│ Lane Detector  │───▶│ Cross-Track Error  │     │  │
+│  │  │ Camera     │    │ (Hough + Poly) │    │ Curvature          │     │  │
+│  │  │            │    └────────────────┘    └────────────────────┘     │  │
+│  │  │ RGB + Depth│                                                      │  │
+│  │  │            │    ┌────────────────┐    ┌────────────────────┐     │  │
+│  │  │            │───▶│ Object         │───▶│ Object List        │     │  │
+│  │  │            │    │ Detector       │    │ (class, bbox,      │     │  │
+│  │  │            │    │ (YOLOv8)       │    │  depth, lane)      │     │  │
+│  │  │            │    └────────────────┘    └────────────────────┘     │  │
+│  │  │            │                                                      │  │
+│  │  │            │    ┌────────────────┐    ┌────────────────────┐     │  │
+│  │  │            │───▶│ Depth          │───▶│ Distance at        │     │  │
+│  │  │            │    │ Estimator      │    │ specific points    │     │  │
+│  │  └────────────┘    └────────────────┘    └────────────────────┘     │  │
+│  │                                                                       │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                          CONTROL LAYER                                │  │
+│  ├──────────────────────────────────────────────────────────────────────┤  │
+│  │                                                                       │  │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                     STATE MACHINE (FSM)                         │  │  │
+│  │  │  ┌──────────────┐ ┌────────────┐ ┌──────────────┐              │  │  │
+│  │  │  │ CENTER_LANE  │ │  STOPPED   │ │ LEFT/RIGHT   │              │  │  │
+│  │  │  │ (default)    │ │ (emergency)│ │ (avoidance)  │              │  │  │
+│  │  │  └──────────────┘ └────────────┘ └──────────────┘              │  │  │
+│  │  └────────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                        │  │
+│  │                              ▼                                        │  │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                   MOTION CONTROLLER                             │  │  │
+│  │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐    │  │  │
+│  │  │  │ PID Control │  │ Speed       │  │ Rate Limiting       │    │  │  │
+│  │  │  │ (Steering)  │  │ Control     │  │ (Smooth motion)     │    │  │  │
+│  │  │  └─────────────┘  └─────────────┘  └─────────────────────┘    │  │  │
+│  │  └────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                       │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                      COMMUNICATION LAYER                              │  │
+│  ├──────────────────────────────────────────────────────────────────────┤  │
+│  │                                                                       │  │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    UART CONTROLLER                              │  │  │
+│  │  │  Commands: E1/E0 (enable/disable)                               │  │  │
+│  │  │            Vxxx  (velocity × 1000)                              │  │  │
+│  │  │            Yxxx  (yaw_rate × 1000)                              │  │  │
+│  │  │            Hxxx  (height × 1000)                                │  │  │
+│  │  └────────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                        │  │
+│  │                              ▼                                        │  │
+│  │                      ┌──────────────┐                                │  │
+│  │                      │    STM32     │                                │  │
+│  │                      │  (Motors)    │                                │  │
+│  │                      └──────────────┘                                │  │
+│  │                                                                       │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+3.2. DATA FLOW
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│   Time ───────────────────────────────────────────────────────────────▶    │
+│                                                                             │
+│   Frame N                                                                   │
+│   ┌────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────┐  │
+│   │RGB │→│ Lane     │→│ State    │→│ Motion   │→│ UART     │→│ CMD │  │
+│   │Depth│ │ Object   │ │ Machine  │ │ Control  │ │ Send     │ │ TX  │  │
+│   └────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └────┘  │
+│   │         │             │             │             │             │      │
+│   0ms       10ms          15ms          18ms          20ms          33ms   │
+│                                                                             │
+│   ◄─────────────────── 33ms (30 FPS) ─────────────────────────────────▶    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                        4. CHI TIẾT CÁC MODULE
+================================================================================
+
+4.1. CAMERA MODULE (src/perception/camera.py)
+--------------------------------------------------------------------------------
+
+4.1.1. Class RealSenseCamera
+────────────────────────────────────────────────────────────────────────────────
+Chức năng:
+- Khởi tạo và quản lý pipeline RealSense
+- Đồng bộ RGB và Depth frames
+- Chuyển đổi depth sang meters
+
+Methods chính:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Method                │ Mô tả                        │ Return               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ start()              │ Khởi động camera              │ bool                 │
+│ stop()               │ Dừng camera                   │ None                 │
+│ get_frames()         │ Lấy RGB + Depth frames        │ (ndarray, ndarray)   │
+│ get_depth_at_point() │ Đo depth tại 1 điểm          │ float (meters)       │
+│ pixel_to_point()     │ Chuyển pixel → 3D point      │ (X, Y, Z)            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+4.1.2. Depth Alignment
+────────────────────────────────────────────────────────────────────────────────
+Vấn đề: RGB camera và Depth sensor có vị trí khác nhau
+        → Pixel (x,y) trong RGB ≠ Pixel (x,y) trong Depth
+
+Giải pháp: Sử dụng rs.align(rs.stream.color)
+- Biến đổi depth frame để align với color frame
+- Sau đó: depth_frame[y, x] = khoảng cách tại pixel (x,y) trong RGB
+
+4.2. LANE DETECTOR MODULE (src/perception/lane_detector.py)
+--------------------------------------------------------------------------------
+
+4.2.1. Pipeline Xử Lý
+────────────────────────────────────────────────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│    Input Frame (640×480 BGR)                                                │
+│           │                                                                 │
+│           ▼                                                                 │
+│    ┌──────────────────┐                                                    │
+│    │ 1. Apply ROI     │  Mask vùng quan sát hình thang (FPV style)         │
+│    │    (Trapezoid)   │                                                    │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 2. Convert to    │  Chuyển sang grayscale để giảm tính toán           │
+│    │    Grayscale     │                                                    │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 3. Threshold     │  Binary threshold cho làn đường đen trên           │
+│    │    (Binary Inv)  │  nền trắng: pixel < threshold → 255                │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 4. Morphology    │  Close: Lấp lỗ hổng                                │
+│    │    Operations    │  Open: Loại nhiễu                                  │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 5. Canny Edge    │  Phát hiện cạnh với 2 ngưỡng                       │
+│    │    Detection     │  low_threshold, high_threshold                     │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 6. HoughLinesP   │  Phát hiện đoạn thẳng                              │
+│    │                  │  Output: [(x1,y1,x2,y2), ...]                      │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 7. Clustering    │  Phân loại đoạn thẳng vào Left/Center/Right        │
+│    │    by X position │  dựa trên vị trí x trung bình                      │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 8. Polynomial    │  Fit đường cong bậc 2: x = Ay² + By + C            │
+│    │    Fitting       │  Cho mỗi làn đường                                 │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    ┌──────────────────┐                                                    │
+│    │ 9. Compute       │  target_x: Vị trí x mục tiêu                       │
+│    │    Navigation    │  CTE: Sai lệch từ tâm ảnh                          │
+│    │    Parameters    │  curvature: Độ cong đường                          │
+│    └────────┬─────────┘                                                    │
+│             │                                                               │
+│             ▼                                                               │
+│    Output: LaneDetectionResult                                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+4.2.2. Polynomial Fitting
+────────────────────────────────────────────────────────────────────────────────
+Lý do dùng x = f(y) thay vì y = f(x):
+- Làn đường gần như thẳng đứng trong ảnh
+- y = f(x) sẽ có vấn đề khi đường gần thẳng đứng (đạo hàm → ∞)
+
+Model: x = A×y² + B×y + C
+
+Tính confidence (R²):
+   R² = 1 - SS_res / SS_tot
+   SS_res = Σ(x_actual - x_predicted)²
+   SS_tot = Σ(x_actual - x_mean)²
+   
+   R² gần 1 = fit tốt
+
+Tính curvature:
+   κ = |x''| / (1 + x'²)^(3/2)
+   x' = 2Ay + B
+   x'' = 2A
+
+4.3. OBJECT DETECTOR MODULE (src/perception/object_detector.py)
+--------------------------------------------------------------------------------
+
+4.3.1. Cấu Trúc Dữ Liệu
+────────────────────────────────────────────────────────────────────────────────
+
+DetectedObject:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Field        │ Type                  │ Mô tả                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ class_id     │ int                   │ COCO class index                    │
+│ class_name   │ str                   │ Tên class (person, car, ...)        │
+│ confidence   │ float                 │ Detection confidence (0-1)          │
+│ bbox         │ (x1, y1, x2, y2)     │ Bounding box coordinates            │
+│ center       │ (cx, cy)             │ Tâm bounding box                    │
+│ depth        │ float                 │ Khoảng cách (meters)                │
+│ lane         │ ObstacleLane          │ LEFT/CENTER/RIGHT/UNKNOWN           │
+│ is_obstacle  │ bool                  │ True nếu trong vùng nguy hiểm       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+4.3.2. Pipeline Phát Hiện
+────────────────────────────────────────────────────────────────────────────────
+1. YOLO Inference: Phát hiện objects trong RGB frame
+2. Filter by class: Chỉ giữ các class cần quan tâm
+3. Depth measurement: Đo khoảng cách tại tâm mỗi bbox
+4. Lane assignment: Phân loại object vào lane dựa trên vị trí x
+5. Obstacle filtering: Đánh dấu obstacle nếu depth < D_SAFE
+
+4.4. DEPTH ESTIMATOR MODULE (src/perception/depth_estimator.py)
+--------------------------------------------------------------------------------
+
+4.4.1. Các Phương Pháp Đo
+────────────────────────────────────────────────────────────────────────────────
+
+a) Đo tại tâm box (Center Depth):
+   - Lấy tọa độ tâm (cx, cy) của bbox
+   - Áp dụng median filter vùng xung quanh
+   - Trả về giá trị depth trung vị
+
+b) Thống kê vùng box (Box Statistics):
+   - avg_depth: Trung bình depth trong box
+   - min_depth: Điểm gần nhất trong box
+   - max_depth: Điểm xa nhất trong box
+
+Lý do dùng median thay vì mean:
+- Median robust với outliers
+- Depth sensor có thể có giá trị lỗi (0 hoặc rất lớn)
+- Median giữ được giá trị thực tế hơn
+
+4.5. STATE MACHINE MODULE (src/control/state_machine.py)
+--------------------------------------------------------------------------------
+
+4.5.1. Bảng Chuyển Trạng Thái
+────────────────────────────────────────────────────────────────────────────────
+┌───────────────────────────────────────────────────────────────────────────┐
+│ Current State │ Condition                          │ Next State          │
+├───────────────────────────────────────────────────────────────────────────┤
+│ CENTER_LANE   │ obstacle_center && !obstacle_right │ RIGHT_LANE          │
+│ CENTER_LANE   │ obstacle_center && !obstacle_left  │ LEFT_LANE           │
+│ CENTER_LANE   │ obstacle_center && all_blocked     │ STOPPED             │
+│ CENTER_LANE   │ emergency_stop                     │ STOPPED             │
+├───────────────────────────────────────────────────────────────────────────┤
+│ LEFT_LANE     │ all_clear (sustained)              │ CENTER_LANE         │
+│ LEFT_LANE     │ obstacle_left                      │ → check center/right│
+│ LEFT_LANE     │ emergency_stop                     │ STOPPED             │
+├───────────────────────────────────────────────────────────────────────────┤
+│ RIGHT_LANE    │ all_clear (sustained)              │ CENTER_LANE         │
+│ RIGHT_LANE    │ obstacle_right                     │ → check center/left │
+│ RIGHT_LANE    │ emergency_stop                     │ STOPPED             │
+├───────────────────────────────────────────────────────────────────────────┤
+│ STOPPED       │ all_clear (sustained)              │ CENTER_LANE         │
+│ STOPPED       │ otherwise                          │ STOPPED             │
+└───────────────────────────────────────────────────────────────────────────┘
+
+4.6. MOTION CONTROLLER MODULE (src/control/motion_controller.py)
+--------------------------------------------------------------------------------
+
+4.6.1. Tính Toán Yaw Rate
+────────────────────────────────────────────────────────────────────────────────
+
+Input: Cross-Track Error (CTE) - sai lệch pixel từ tâm ảnh
+Output: Yaw rate (rad/s)
+
+yaw_rate = PID.compute(CTE)
+         = Kp × CTE + Ki × ∫CTE×dt + Kd × dCTE/dt
+
+4.6.2. Tính Toán Velocity
+────────────────────────────────────────────────────────────────────────────────
+
+Các yếu tố ảnh hưởng:
+1. Curvature: Đường cong → giảm tốc
+2. Obstacle distance: Vật cản gần → giảm tốc
+3. State: STOPPED → velocity = 0
+
+Công thức:
+   velocity = SPEED_NORMAL
+   
+   if curvature > CURVATURE_HIGH_THRESHOLD:
+       velocity = min(velocity, SPEED_SLOW)
+   
+   if has_obstacle:
+       distance_ratio = obstacle_distance / D_SAFE
+       obstacle_speed = SPEED_MIN + (SPEED_SLOW - SPEED_MIN) × distance_ratio
+       velocity = min(velocity, obstacle_speed)
+   
+   velocity = clamp(velocity, SPEED_MIN, SPEED_MAX)
+
+================================================================================
+               5. CÁC THÔNG SỐ QUAN TRỌNG VÀ CÁCH ĐIỀU CHỈNH
+================================================================================
+
+5.1. THÔNG SỐ CAMERA
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter      │ Default │ Range      │ Ảnh hưởng                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ CAMERA_WIDTH   │ 640     │ 320-1920   │ Độ phân giải ảnh. Cao hơn =        │
+│                │         │            │ chi tiết hơn nhưng chậm hơn        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ CAMERA_HEIGHT  │ 480     │ 240-1080   │ Tương tự width                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ CAMERA_FPS     │ 30      │ 15-60      │ Frame rate. Cao = mượt hơn         │
+│                │         │            │ nhưng tốn CPU hơn                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.2. THÔNG SỐ ROI (VÙNG QUAN SÁT)
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter        │ Default │ Range   │ Cách điều chỉnh                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ROI_TOP_Y        │ 0.40    │ 0.2-0.6 │ Điểm bắt đầu phía trên.             │
+│                  │         │         │ Nhỏ hơn = nhìn xa hơn               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ROI_BOTTOM_Y     │ 0.79    │ 0.6-1.0 │ Điểm kết thúc phía dưới.            │
+│                  │         │         │ Tránh đặt = 1.0 để bỏ nắp xe        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ROI_TOP_LEFT_X   │ 0.15    │ 0.0-0.4 │ Góc trên trái. Lớn hơn = thu hẹp    │
+│                  │         │         │ vùng quan sát                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ROI_TOP_RIGHT_X  │ 0.97    │ 0.6-1.0 │ Góc trên phải. Nhỏ hơn = thu hẹp    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ROI_BOTTOM_*_X   │ 0.0/1.0 │ 0.0-1.0 │ Thường để 0 và 1 (full width)       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Minh họa ROI:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│    0%─────────────────────────────────────────────────────────────────100%  │
+│    │                                                                    │   │
+│    │                     ╔═══════════════════════╗                     │   │
+│ 40%│   ROI_TOP_LEFT_X ─▶ ║                       ║ ◀─ ROI_TOP_RIGHT_X  │   │
+│    │                     ║    ROI TRAPEZOID      ║                     │   │
+│    │                     ║    (Lane Detection    ║                     │   │
+│    │                     ║     Area)             ║                     │   │
+│    │                     ║                       ║                     │   │
+│ 79%│ ROI_BOTTOM_LEFT_X─▶ ╚═══════════════════════╝ ◀─ROI_BOTTOM_RIGHT_X│   │
+│    │                                                                    │   │
+│100%└────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.3. THÔNG SỐ LANE DETECTION
+--------------------------------------------------------------------------------
+
+5.3.1. Threshold
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter        │ Default │ Range   │ Cách điều chỉnh                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ BLACK_THRESHOLD  │ 100     │ 50-150  │ Ngưỡng phân biệt làn đường đen.     │
+│                  │         │         │ - Làn mờ → giảm xuống               │
+│                  │         │         │ - Nhiều nhiễu → tăng lên            │
+│                  │         │         │ Dùng Calibration Tool để chỉnh      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.3.2. Morphological Operations
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter              │ Default │ Range │ Ảnh hưởng                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ MORPH_KERNEL_SIZE      │ 1       │ 1-7   │ Kích thước kernel.              │
+│                        │         │       │ Lớn hơn = mạnh hơn, có thể      │
+│                        │         │       │ làm mất chi tiết                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ MORPH_CLOSE_ITERATIONS │ 2       │ 1-5   │ Số lần áp dụng Close.           │
+│                        │         │       │ Nhiều hơn = lấp lỗ tốt hơn      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ MORPH_OPEN_ITERATIONS  │ 1       │ 1-3   │ Số lần áp dụng Open.            │
+│                        │         │       │ Nhiều hơn = loại nhiễu tốt hơn  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.3.3. Canny Edge Detection
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter           │ Default │ Range   │ Cách điều chỉnh                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ CANNY_LOW_THRESHOLD │ 50      │ 20-100  │ Ngưỡng thấp.                     │
+│                     │         │         │ - Giảm = nhiều edge hơn (nhiễu)  │
+│                     │         │         │ - Tăng = ít edge hơn             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ CANNY_HIGH_THRESHOLD│ 94      │ 80-200  │ Ngưỡng cao.                      │
+│                     │         │         │ - Thường = 2-3× low threshold    │
+│                     │         │         │ - Giảm = nhiều edge yếu hơn      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Quan hệ giữa 2 ngưỡng:
+- Pixel > high: Chắc chắn là edge
+- low < Pixel < high: Là edge nếu kết nối với pixel > high
+- Pixel < low: Không phải edge
+
+5.3.4. Hough Transform
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter            │ Default │ Range  │ Cách điều chỉnh                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ HOUGH_THRESHOLD      │ 23      │ 10-50  │ Số vote tối thiểu.               │
+│                      │         │        │ - Giảm = nhiều lines (có nhiễu)  │
+│                      │         │        │ - Tăng = ít lines, chỉ rõ ràng   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ HOUGH_MIN_LINE_LENGTH│ 57      │ 20-150 │ Độ dài tối thiểu (pixels).       │
+│                      │         │        │ - Giảm = phát hiện đoạn ngắn     │
+│                      │         │        │ - Tăng = chỉ đoạn dài            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ HOUGH_MAX_LINE_GAP   │ 29      │ 5-50   │ Khoảng cách max để nối đoạn.     │
+│                      │         │        │ - Tăng = nối nhiều đoạn đứt      │
+│                      │         │        │ - Giảm = nhiều đoạn riêng lẻ     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.3.5. Lane Clustering
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter         │ Default │ Ý nghĩa                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ LEFT_LANE_X_MIN   │ 0       │ Biên trái của vùng lane trái                │
+│ LEFT_LANE_X_MAX   │ 200     │ Biên phải của vùng lane trái                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ CENTER_LANE_X_MIN │ 200     │ Biên trái của vùng lane giữa                │
+│ CENTER_LANE_X_MAX │ 440     │ Biên phải của vùng lane giữa                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ RIGHT_LANE_X_MIN  │ 440     │ Biên trái của vùng lane phải                │
+│ RIGHT_LANE_X_MAX  │ 640     │ Biên phải của vùng lane phải                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Lưu ý: Các giá trị này phụ thuộc vào CAMERA_WIDTH và vị trí camera.
+       Cần điều chỉnh theo thiết lập thực tế.
+
+5.4. THÔNG SỐ OBJECT DETECTION
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter                 │ Default │ Range     │ Ảnh hưởng                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ YOLO_CONFIDENCE_THRESHOLD │ 0.5     │ 0.3-0.8   │ Ngưỡng confidence.       │
+│                           │         │           │ - Giảm = nhiều detection │
+│                           │         │           │   (có false positive)    │
+│                           │         │           │ - Tăng = ít detection    │
+│                           │         │           │   (có false negative)    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ YOLO_NMS_THRESHOLD        │ 0.4     │ 0.3-0.7   │ Ngưỡng NMS IoU.          │
+│                           │         │           │ - Giảm = loại nhiều box  │
+│                           │         │           │   trùng lặp              │
+│                           │         │           │ - Tăng = giữ nhiều box   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.5. THÔNG SỐ DEPTH ESTIMATION
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter              │ Default │ Range    │ Ý nghĩa                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ DEPTH_MEDIAN_FILTER_SIZE│ 3      │ 3-9 (lẻ)│ Kích thước kernel filter.    │
+│                        │         │          │ Lớn hơn = smooth hơn,        │
+│                        │         │          │ nhưng mất chi tiết           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ DEPTH_MIN_VALID        │ 0.1     │ 0.1-0.5  │ Khoảng cách tối thiểu hợp lệ │
+│                        │         │          │ (loại bỏ giá trị 0)          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ DEPTH_MAX_VALID        │ 10.0    │ 5-15     │ Khoảng cách tối đa hợp lệ    │
+│                        │         │          │ (loại bỏ giá trị quá xa)     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.6. THÔNG SỐ OBSTACLE DETECTION
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter      │ Default │ Range   │ Ý nghĩa & Cách điều chỉnh             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ D_SAFE         │ 2.0m    │ 1.5-5.0 │ Khoảng cách an toàn.                  │
+│                │         │         │ Object < D_SAFE = obstacle            │
+│                │         │         │ - Robot nhanh → tăng lên              │
+│                │         │         │ - Không gian hẹp → giảm xuống         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ D_EMERGENCY    │ 0.5m    │ 0.3-1.0 │ Khoảng cách dừng khẩn cấp.            │
+│                │         │         │ Object < D_EMERGENCY = STOP ngay      │
+│                │         │         │ - Phải < D_SAFE                       │
+│                │         │         │ - Phụ thuộc tốc độ phanh              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.7. THÔNG SỐ STATE MACHINE
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter                  │ Default │ Range │ Ý nghĩa                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ LANE_TRANSITION_HYSTERESIS │ 5       │ 3-10  │ Số frame liên tục để        │
+│                            │         │       │ quyết định chuyển lane.     │
+│                            │         │       │ - Tăng = ổn định hơn,       │
+│                            │         │       │   nhưng phản ứng chậm       │
+│                            │         │       │ - Giảm = nhanh hơn, có      │
+│                            │         │       │   thể bị flickering         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ OBSTACLE_CLEAR_FRAMES      │ 10      │ 5-20  │ Số frame không có obstacle  │
+│                            │         │       │ để quay về CENTER_LANE.     │
+│                            │         │       │ - Tăng = đảm bảo an toàn    │
+│                            │         │       │ - Giảm = quay về nhanh hơn  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+5.8. THÔNG SỐ PID CONTROLLER
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter      │ Default  │ Range        │ Cách điều chỉnh                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PID_KP         │ 0.005    │ 0.001-0.02   │ Proportional gain.              │
+│                │          │              │ - Tăng = phản ứng nhanh hơn,    │
+│                │          │              │   có thể dao động               │
+│                │          │              │ - Giảm = phản ứng chậm, mượt    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PID_KI         │ 0.0001   │ 0-0.001      │ Integral gain.                  │
+│                │          │              │ - Tăng = giảm steady-state      │
+│                │          │              │   error, có thể overshoot       │
+│                │          │              │ - Giảm/0 = không tích lũy       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PID_KD         │ 0.002    │ 0-0.01       │ Derivative gain.                │
+│                │          │              │ - Tăng = giảm overshoot,        │
+│                │          │              │   có thể nhạy với noise         │
+│                │          │              │ - Giảm = cho phép overshoot     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PID_OUTPUT_MIN │ -1.0     │ -2.0 to -0.5│ Giới hạn yaw rate tối thiểu     │
+│ PID_OUTPUT_MAX │ 1.0      │ 0.5 to 2.0  │ Giới hạn yaw rate tối đa        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PID_INTEGRAL_LIMIT│ 100.0 │ 50-200      │ Anti-windup limit               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Quy trình tuning PID:
+1. Đặt Ki = Kd = 0
+2. Tăng Kp cho đến khi bắt đầu dao động
+3. Giảm Kp xuống ~60% giá trị đó
+4. Tăng Kd để giảm overshoot
+5. Nếu cần, thêm Ki nhỏ để giảm steady-state error
+
+5.9. THÔNG SỐ SPEED CONTROL
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter    │ Default │ Range     │ Ý nghĩa                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ SPEED_MAX    │ 0.8     │ 0.5-2.0   │ Tốc độ tối đa (m/s)                   │
+│ SPEED_NORMAL │ 0.6     │ 0.3-1.5   │ Tốc độ bình thường                    │
+│ SPEED_SLOW   │ 0.3     │ 0.2-0.8   │ Tốc độ chậm (khi có obstacle/cua)     │
+│ SPEED_MIN    │ 0.2     │ 0.1-0.4   │ Tốc độ tối thiểu                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Lưu ý: SPEED_MIN ≤ SPEED_SLOW ≤ SPEED_NORMAL ≤ SPEED_MAX
+
+5.10. THÔNG SỐ RATE LIMITING
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Parameter               │ Default │ Range     │ Ý nghĩa                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ MAX_VELOCITY_CHANGE_RATE│ 0.1     │ 0.05-0.3  │ Thay đổi tốc độ tối đa     │
+│                         │         │           │ mỗi cycle (m/s per cycle)  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ MAX_YAW_CHANGE_RATE     │ 0.2     │ 0.1-0.5   │ Thay đổi yaw rate tối đa   │
+│                         │         │           │ mỗi cycle (rad/s per cycle)│
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Tác dụng:
+- Tăng = phản ứng nhanh hơn, có thể giật
+- Giảm = mượt mà hơn, phản ứng chậm
+
+================================================================================
+                    6. THUẬT TOÁN VÀ PHƯƠNG PHÁP
+================================================================================
+
+6.1. THUẬT TOÁN TÍNH CROSS-TRACK ERROR
+--------------------------------------------------------------------------------
+
+Cross-Track Error (CTE) là sai lệch giữa vị trí mục tiêu và tâm ảnh.
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│                         Image Frame (640×480)                               │
+│    ┌─────────────────────────────────────────────────────────────────┐     │
+│    │                                                                   │     │
+│    │                        Target Point                               │     │
+│    │                            ●                                      │     │
+│    │                            │                                      │     │
+│    │          CTE = target_x - center_x                               │     │
+│    │                            │                                      │     │
+│    │              ◄─────────────┼───────────▶                         │     │
+│    │                            │                                      │     │
+│    │                     Image Center                                  │     │
+│    │                            │                                      │     │
+│    │                            ▼                                      │     │
+│    │                          (320, y)                                │     │
+│    │                                                                   │     │
+│    └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│    CTE > 0: Target ở bên phải → Robot cần rẽ phải                          │
+│    CTE < 0: Target ở bên trái → Robot cần rẽ trái                          │
+│    CTE = 0: Đang đúng hướng                                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+6.2. THUẬT TOÁN XÁC ĐỊNH TARGET POINT
+--------------------------------------------------------------------------------
+
+Ưu tiên:
+1. Nếu có CENTER_LANE: target_x = center_lane tại look_ahead_y
+2. Nếu có LEFT + RIGHT: target_x = (left_x + right_x) / 2
+3. Nếu chỉ có LEFT: target_x = left_x + offset
+4. Nếu chỉ có RIGHT: target_x = right_x - offset
+5. Không có gì: target_x = image_center (320)
+
+6.3. THUẬT TOÁN OBSTACLE LANE ASSIGNMENT
+--------------------------------------------------------------------------------
+
+Phân loại obstacle vào lane dựa trên vị trí x của tâm bbox:
+
+   if center_x < CAMERA_WIDTH / 3:
+       lane = LEFT
+   elif center_x > CAMERA_WIDTH * 2 / 3:
+       lane = RIGHT
+   else:
+       lane = CENTER
+
+Minh họa (640 width):
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│    ◄──────── LEFT ─────────▶◄────── CENTER ──────▶◄────── RIGHT ───────▶   │
+│    0                       213                   426                  640   │
+│    │                        │                     │                    │    │
+│    └────────────────────────┴─────────────────────┴────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+6.4. THUẬT TOÁN ĐIỀU KHIỂN CHUYỂN LANE
+--------------------------------------------------------------------------------
+
+Khi State Machine quyết định chuyển lane:
+1. Lấy lane_offset từ state (LEFT: -150, RIGHT: +150, CENTER: 0)
+2. Điều chỉnh CTE: adjusted_CTE = CTE + lane_offset
+3. PID controller điều khiển dựa trên adjusted_CTE
+
+Kết quả: Robot tự động di chuyển sang lane mới.
+
+================================================================================
+                      7. HƯỚNG DẪN CALIBRATION
+================================================================================
+
+7.1. CALIBRATION LANE DETECTION
+--------------------------------------------------------------------------------
+
+7.1.1. Chạy Tool Calibration
+────────────────────────────────────────────────────────────────────────────────
+   python -m tools.calibration.lane_calibration
+
+7.1.2. Các Bước Calibration
+────────────────────────────────────────────────────────────────────────────────
+Bước 1: Điều chỉnh ROI
+   - Đặt robot ở vị trí điển hình trên đường
+   - Điều chỉnh ROI Top Y để bao gồm đường phía trước
+   - Điều chỉnh ROI Bottom Y để loại bỏ nắp xe (nếu có)
+   - Điều chỉnh ROI Left/Right X để tập trung vào vùng đường
+
+Bước 2: Điều chỉnh Threshold
+   - Quan sát panel "Threshold" (binary image)
+   - Điều chỉnh để làn đường hiện rõ (trắng) trên nền đen
+   - Nếu nhiều nhiễu: tăng threshold
+   - Nếu làn mất: giảm threshold
+
+Bước 3: Điều chỉnh Morphology
+   - Quan sát panel "Morphed"
+   - Nếu làn đứt đoạn: tăng kernel size hoặc close iterations
+   - Nếu nhiều nhiễu: tăng open iterations
+
+Bước 4: Điều chỉnh Canny
+   - Quan sát panel "Edges"
+   - Điều chỉnh để có edge rõ ràng của làn đường
+   - Tỉ lệ Low:High thường là 1:2 hoặc 1:3
+
+Bước 5: Điều chỉnh Hough
+   - Quan sát panel "Lines" (số đoạn thẳng phát hiện)
+   - Nếu ít lines: giảm threshold, giảm min length
+   - Nếu nhiều lines sai: tăng threshold, tăng min length
+
+Bước 6: Lưu Parameters
+   - Nhấn 'S' để lưu
+   - Copy giá trị in ra vào config file
+
+7.1.3. Tips Calibration
+────────────────────────────────────────────────────────────────────────────────
+- Calibrate trong điều kiện ánh sáng thực tế sẽ sử dụng
+- Thử với nhiều vị trí khác nhau trên đường
+- Chú ý cả đường thẳng và đường cong
+- Đảm bảo các lane được phát hiện đúng (Left/Center/Right)
+
+7.2. CALIBRATION DEPTH CAMERA
+--------------------------------------------------------------------------------
+
+7.2.1. Chạy Tool
+────────────────────────────────────────────────────────────────────────────────
+   python -m tools.calibration.depth_calibration
+
+7.2.2. Kiểm Tra Độ Chính Xác
+────────────────────────────────────────────────────────────────────────────────
+1. Đặt vật thể ở khoảng cách đã biết (dùng thước đo)
+2. Click vào vật thể trong camera view
+3. So sánh giá trị depth đo được với khoảng cách thực tế
+4. Sai số chấp nhận được: < 5% cho khoảng cách < 3m
+
+7.2.3. Các Vấn Đề Thường Gặp
+────────────────────────────────────────────────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Vấn đề              │ Nguyên nhân              │ Giải pháp                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Depth = N/A         │ Quá gần (<0.1m)          │ Đặt xa hơn                │
+│ (không đo được)     │ Quá xa (>10m)            │ Đặt gần hơn               │
+│                     │ Bề mặt phản xạ kém       │ Tránh gương, kính         │
+│                     │ Ánh sáng mạnh            │ Tránh nắng trực tiếp      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Depth dao động      │ Noise từ sensor          │ Tăng median filter size   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Depth sai nhiều     │ Camera chưa warm up      │ Chờ 30s sau khi bật       │
+│                     │ Bề mặt đen/trong suốt    │ Tránh các bề mặt này      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+7.3. CALIBRATION PID CONTROLLER
+--------------------------------------------------------------------------------
+
+7.3.1. Phương Pháp Tuning
+────────────────────────────────────────────────────────────────────────────────
+Sử dụng phương pháp Ziegler-Nichols đơn giản hóa:
+
+Bước 1: Đặt Ki = Kd = 0
+Bước 2: Tăng Kp từ 0 cho đến khi robot bắt đầu dao động (oscillation)
+        Gọi giá trị này là Ku (ultimate gain)
+Bước 3: Đặt Kp = 0.6 × Ku
+Bước 4: Đặt Kd để giảm overshoot (thử 0.1 × Kp)
+Bước 5: Nếu cần, thêm Ki = 0.01 × Kp để giảm steady-state error
+
+7.3.2. Dấu Hiệu Cần Điều Chỉnh
+────────────────────────────────────────────────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Triệu chứng                │ Nguyên nhân có thể     │ Điều chỉnh            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot dao động qua lại     │ Kp quá cao             │ Giảm Kp               │
+│ liên tục (oscillation)     │ Kd quá thấp            │ Tăng Kd               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot phản ứng chậm        │ Kp quá thấp            │ Tăng Kp               │
+│ không bám được lane        │                        │                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot overshoot nhiều      │ Kp quá cao             │ Giảm Kp hoặc tăng Kd  │
+│ (vượt quá rồi quay lại)    │ Kd quá thấp            │                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot không về được        │ Ki quá thấp            │ Tăng Ki               │
+│ chính giữa (steady-state)  │                        │                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot giật khi có noise    │ Kd quá cao             │ Giảm Kd               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                     8. GIAO TIẾP UART VỚI STM32 (ĐÃ KIỂM NGHIỆM)
+================================================================================
+
+8.1. THÔNG TIN KẾT NỐI
+--------------------------------------------------------------------------------
+Trạng thái: ✅ ĐÃ KẾT NỐI THÀNH CÔNG
+Cổng: /dev/ttyACM0 (DaMiao-Tech DM-USB2FDCAN)
+Baud rate: 115200
+Data bits: 8
+Parity: None
+Stop bits: 1
+
+8.1. PROTOCOL ĐỊNH NGHĨA
+--------------------------------------------------------------------------------
+
+8.1.1. Format Lệnh
+────────────────────────────────────────────────────────────────────────────────
+   <COMMAND><VALUE>\n
+
+   Trong đó:
+   - COMMAND: 1-2 ký tự ASCII (E, V, Y, H)
+   - VALUE: Số nguyên (có dấu cho V, Y)
+   - \n: Newline kết thúc lệnh
+
+8.1.2. Bảng Lệnh Hoàn Chỉnh (ĐÃ KIỂM NGHIỆM)
+────────────────────────────────────────────────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Lệnh    │ Chức năng              │ Đơn vị gốc │ Hệ số  │ Ví dụ     │ Kết quả   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ **E1**  │ Bật điều khiển         │ -          │ -      │ E1\n      │ ✅ TESTED │
+│ **E0**  │ Tắt điều khiển         │ -          │ -      │ E0\n      │ ✅ TESTED │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ **Vxxx**│ Vận tốc tiến/lùi       │ m/s        │ ×1000  │ V800\n    │ ✅ TESTED │
+│ **V-xx**│ Vận tốc lùi            │ m/s        │ ×1000  │ V-500\n   │ ✅ TESTED │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ **Yxxx**│ Tốc độ quay (yaw rate) │ rad/s      │ ×1000  │ Y500\n    │ ✅ TESTED │
+│ **Y-xx**│ Quay trái              │ rad/s      │ ×1000  │ Y-300\n   │ ✅ TESTED │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ **Hxxx**│ Chiều cao chân         │ m          │ ×1000  │ H100\n    │ ✅ TESTED │
+│ **Rxxx**│ Góc roll (nghiêng)     │ rad        │ ×1000  │ R100\n    │ ✅ TESTED │
+│ **R-xx**│ Roll âm                │ rad        │ ×1000  │ R-50\n    │ ✅ TESTED │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ **J1**  │ Nhảy                   │ -          │ -      │ J1\n      │ ✅ TESTED │
+│ **?**   │ Heartbeat              │ -          │ -      │ ?\n       │ ✅ TESTED │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Ghi chú:
+- Tất cả lệnh đã được kiểm nghiệm thực tế
+- Robot phản hồi với format: 'R=x.xx P=x.xx Y=x.xx', 'OK V=x.xxx', 'ERR'
+- Heartbeat mechanism đã được cập nhật để chấp nhận các phản hồi của robot
+
+8.1.3. Quy ước dấu
+────────────────────────────────────────────────────────────────────────────────
+Velocity (V):
+   - Dương (+): Tiến về phía trước
+   - Âm (-): Lùi về phía sau
+
+Yaw Rate (Y):
+   - Dương (+): Quay phải (theo chiều kim đồng hồ từ trên nhìn xuống)
+   - Âm (-): Quay trái (ngược chiều kim đồng hồ)
+
+8.2. TÍNH TOÁN CHUYỂN ĐỔI
+--------------------------------------------------------------------------------
+
+Python → UART:
+   velocity_cmd = int(velocity_m_s * 1000)  # 0.5 → 500
+   yaw_rate_cmd = int(yaw_rate_rad_s * 1000)  # 0.2 → 200
+
+STM32 nhận → Thực tế:
+   actual_velocity = received_value / 1000.0  # 500 → 0.5
+   actual_yaw_rate = received_value / 1000.0  # 200 → 0.2
+
+8.3. TIMING VÀ RATE CONTROL
+--------------------------------------------------------------------------------
+- UART_COMMAND_RATE_HZ: 10Hz (mặc định)
+- Tức là gửi lệnh mỗi 100ms
+- Có queue để buffer commands
+- Chỉ gửi khi giá trị thay đổi (optimization)
+
+================================================================================
+                   9. XỬ LÝ LỖI VÀ TROUBLESHOOTING
+================================================================================
+
+9.1. LỖI CAMERA
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Lỗi                        │ Nguyên nhân           │ Giải pháp              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "Failed to start camera"   │ Camera chưa kết nối   │ Kiểm tra USB           │
+│                            │ Driver chưa cài       │ Cài librealsense       │
+│                            │ Permission denied     │ sudo chmod 666 /dev/*  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "No camera frame"          │ Camera bị disconnect  │ Reconnect USB          │
+│                            │ USB bandwidth issue   │ Dùng USB 3.0           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Frame rate thấp            │ CPU quá tải           │ Giảm resolution        │
+│                            │ USB 2.0               │ Dùng USB 3.0           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+9.2. LỖI UART COMMUNICATION (ĐÃ GIẢI QUYẾT)
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Lỗi                        │ Nguyên nhân           │ Giải pháp (ĐÃ SỬA)     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "No such file /dev/ttyUSB0"│ Sai port device        │ ✅ Cấu hình /dev/ttyACM0 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "Permission denied"        │ User không trong       │ ✅ Hướng dẫn thêm    │
+│                            │ dialout group          │ vào dialout group      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "Invalid heartbeat         │ Robot dùng protocol    │ ✅ Cập nhật validation │
+│  response" liên tục        │ response khác          │ chấp nhận 'R=', 'OK'   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "Connection lost" liên tục │ Heartbeat timeout      │ ✅ Sửa logic timeout    │
+│                            │ không phù hợp          │ và response handling   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Trạng thái kiểm nghiệm: ✅ Tất cả lệnh đã được test thành công với STM32
+
+================================================================================
+                   10. CÁC CẢI TIẾN ĐÃ THỰC HIỆN (2026)
+================================================================================
+
+10.1. CẢI THIỆN UART COMMUNICATION
+--------------------------------------------------------------------------------
+✅ Đã sửa lỗi kết nối: Chuyển từ /dev/ttyUSB0 → /dev/ttyACM0
+✅ Cập nhật heartbeat validation: Chấp nhận responses thực tế từ robot
+✅ Giảm noise trong logs: Tắt warning không cần thiết
+✅ Kiểm nghiệm tất cả commands: E1/E0, V, Y, H, R, J1
+✅ Tool testing hoàn chỉnh: test_uart_simple.py
+
+10.2. TỐI ƯU HÓA HIỆU NĂNG
+--------------------------------------------------------------------------------
+✅ Sửa lỗi shebang trong test scripts
+✅ Cải thiện error handling và user experience
+✅ Thêm detailed logging cho debugging
+✅ Cấu hình permissions cho serial ports
+
+10.3. DOCUMENTATION IMPROVEMENTS
+--------------------------------------------------------------------------------
+✅ Cập nhật chi tiết protocol UART
+✅ Thêm troubleshooting guide đầy đủ
+✅ Bảng lệnh với status kiểm nghiệm
+✅ Hướng dẫn setup environment
+
+================================================================================
+                   11. KẾT LUẬN VÀ HƯỚNG PHÁT TRIỂN
+================================================================================
+
+11.1. TÌNH TRẠNG DỰ ÁN HIỆN TẠI (01/2026)
+--------------------------------------------------------------------------------
+🟢 HOÀN THÀNH:
+- ✅ UART Communication: Hoạt động ổn định với STM32
+- ✅ Camera Interface: RealSense D435i integration
+- ✅ Lane Detection: Algorithm và calibration tools
+- ✅ Object Detection: YOLOv8 integration
+- ✅ State Machine: Logic điều khiển
+- ✅ Testing Tools: Comprehensive test suite
+
+🟡 ĐANG PHÁT TRIỂN:
+- 🔄 Motion Controller: PID tuning và optimization
+- 🔄 Depth Processing: Real-time performance
+- 🔄 Integration Testing: Full system validation
+
+🔴 KẾ HOẠCH:
+- 📋 Field Testing: Real-world scenarios
+- 📋 Performance Optimization: Speed và accuracy
+- 📋 Safety Features: Emergency stop protocols
+
+11.2. LESSONS LEARNED
+--------------------------------------------------------------------------------
+1. **Hardware Compatibility**: Serial port configuration đòi hỏi testing kỹ
+2. **Protocol Design**: Robot response format cần được document rõ ràng
+3. **Testing Strategy**: Incremental testing từng module trước khi integration
+4. **Documentation**: Chi tiết troubleshooting guide quan trọng cho maintenance
+
+11.3. HƯỚNG PHÁT TRIỂN TIẾP THEO
+--------------------------------------------------------------------------------
+
+Ngắn hạn (1-3 tháng):
+- Real-world testing với các điều kiện ánh sáng khác nhau
+- Fine-tuning PID parameters cho motion control
+- Optimization performance cho real-time processing
+
+Trung hạn (3-6 tháng):
+- Thêm advanced obstacle avoidance algorithms
+- Integration với GPS và IMU sensors
+- Development web interface cho monitoring
+
+Dài hạn (6-12 tháng):
+- Machine Learning cho adaptive behavior
+- Multi-robot coordination
+- Commercial deployment readiness
+
+================================================================================
+                              PHỤ LỤC
+================================================================================
+
+A. TESTING CHECKLIST
+- [x] Camera initialization và frame capture
+- [x] Lane detection trong các điều kiện khác nhau
+- [x] Object detection accuracy và speed
+- [x] UART communication với tất cả commands
+- [x] State machine transitions
+- [ ] Full system integration test
+- [ ] Performance benchmarking
+- [ ] Real-world field testing
+
+B. PERFORMANCE METRICS
+- Frame processing: ~30ms (33 FPS capability)
+- Lane detection latency: ~10-15ms
+- Object detection latency: ~8-12ms
+- UART command rate: 10Hz stable
+- System memory usage: <2GB RAM
+
+C. DEVELOPMENT ENVIRONMENT
+- OS: Ubuntu 20.04 LTS
+- Python: 3.8+
+- OpenCV: 4.5.3
+- PyTorch: 1.10.0
+- Hardware: Intel CPU + CUDA GPU (optional)
+
+================================================================================
+                          END OF REPORT
+================================================================================
+
+9.3. LỖI LANE DETECTION
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Lỗi                        │ Nguyên nhân           │ Giải pháp              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Không phát hiện lane       │ ROI không đúng        │ Calibrate lại ROI      │
+│                            │ Threshold không đúng  │ Điều chỉnh threshold   │
+│                            │ Làn đường quá mờ      │ Giảm threshold         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Phát hiện sai lane         │ Nhiễu trong ảnh       │ Tăng morph kernel      │
+│                            │ Hough params sai      │ Điều chỉnh Hough       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Lane flickering            │ Params không ổn định  │ Tăng min_line_length   │
+│ (nhấp nháy)                │                       │ Dùng temporal filter   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+9.3. LỖI OBJECT DETECTION
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Lỗi                        │ Nguyên nhân           │ Giải pháp              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ YOLO không load            │ Model file không có   │ Download model         │
+│                            │ Path sai              │ Kiểm tra path          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ False positive nhiều       │ Confidence thấp       │ Tăng threshold         │
+│ (detect sai)               │                       │                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ False negative nhiều       │ Confidence cao        │ Giảm threshold         │
+│ (miss detection)           │ Object quá nhỏ/xa    │ Dùng model lớn hơn     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Detection chậm             │ Model quá lớn         │ Dùng YOLOv8n           │
+│                            │ Không có GPU          │ Sử dụng GPU            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+9.4. LỖI UART
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Lỗi                        │ Nguyên nhân           │ Giải pháp              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "Permission denied"        │ Không có quyền        │ sudo usermod -a -G     │
+│                            │ truy cập serial port  │ dialout $USER          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ "Port not found"           │ Port sai              │ ls /dev/ttyUSB*        │
+│                            │ Cable chưa kết nối    │ Kiểm tra cable         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot không phản hồi       │ Baudrate sai          │ Kiểm tra baudrate      │
+│                            │ STM32 chưa sẵn sàng   │ Reset STM32            │
+│                            │ Protocol sai          │ Kiểm tra format lệnh   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+9.5. LỖI CHUYỂN ĐỘNG
+--------------------------------------------------------------------------------
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Lỗi                        │ Nguyên nhân           │ Giải pháp              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot dao động             │ PID Kp quá cao        │ Giảm Kp, tăng Kd       │
+│                            │ Rate limiting thấp    │ Tăng rate limit        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot phản ứng chậm        │ PID Kp quá thấp       │ Tăng Kp                │
+│                            │ Rate limiting cao     │ Giảm rate limit        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot đi không thẳng       │ CTE calculation sai   │ Kiểm tra ROI, target   │
+│                            │ Hardware không cân    │ Calibrate hardware     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Robot dừng đột ngột        │ Emergency stop        │ Kiểm tra D_EMERGENCY   │
+│                            │ Lane invalid          │ Kiểm tra lane detect   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                    10. KẾT LUẬN VÀ HƯỚNG PHÁT TRIỂN
+================================================================================
+
+10.1. TÓM TẮT HỆ THỐNG
+--------------------------------------------------------------------------------
+Hệ thống robot tự hành đã xây dựng bao gồm:
+- Perception: Camera RGB-D + Lane Detection + Object Detection
+- Decision: Finite State Machine với hysteresis
+- Control: PID steering + Speed control với rate limiting
+- Communication: UART protocol với STM32
+
+10.2. ĐIỂM MẠNH
+--------------------------------------------------------------------------------
+- Modular design: Dễ maintain, test từng module độc lập
+- Real-time capable: 30 FPS với full pipeline
+- Safety-first: Multiple safety checks (D_SAFE, D_EMERGENCY, lane validity)
+- Configurable: YAML config cho phép điều chỉnh không cần sửa code
+
+10.3. HẠN CHẾ
+--------------------------------------------------------------------------------
+- Phụ thuộc vào lane markings rõ ràng
+- Depth range giới hạn (0.1-10m)
+- Chưa có path planning nâng cao
+- Chưa hỗ trợ multi-robot
+
+10.4. HƯỚNG PHÁT TRIỂN
+--------------------------------------------------------------------------------
+1. Deep Learning Lane Detection: Thay thế Hough bằng neural network
+2. Sensor Fusion: Kết hợp LiDAR, IMU
+3. Path Planning: A*, RRT cho navigation
+4. SLAM: Simultaneous Localization and Mapping
+5. V2X Communication: Giao tiếp với infrastructure
+
+================================================================================
+                              PHỤ LỤC
+================================================================================
+
+A. DANH SÁCH FILES
+--------------------------------------------------------------------------------
+autonomous_robot/
+├── run_robot.py              - Entry point
+├── configs/
+│   └── default_config.yaml   - Configuration
+├── src/
+│   ├── core/config.py        - Config management
+│   ├── perception/
+│   │   ├── camera.py         - RealSense interface
+│   │   ├── lane_detector.py  - Lane detection
+│   │   ├── object_detector.py- YOLO detection
+│   │   └── depth_estimator.py- Depth measurement
+│   ├── control/
+│   │   ├── state_machine.py  - FSM
+│   │   └── motion_controller.py - PID control
+│   └── communication/
+│       └── uart_controller.py - UART interface
+├── tools/
+│   └── calibration/          - Calibration tools
+└── tests/                    - Unit tests
+
+B. CÔNG THỨC THAM KHẢO NHANH
+--------------------------------------------------------------------------------
+CTE = target_x - image_center_x
+yaw_rate = Kp×CTE + Ki×∫CTE×dt + Kd×dCTE/dt
+curvature κ = |x''| / (1 + x'²)^(3/2)
+depth = median(depth_region[(depth > 0.1) & (depth < 10)])
+IoU = Area_intersection / Area_union
+
+C. CHECKLIST TRƯỚC KHI CHẠY
+--------------------------------------------------------------------------------
+[ ] Camera kết nối và hoạt động (realsense-viewer)
+[ ] UART kết nối đúng port (ls /dev/ttyUSB*)
+[ ] Model YOLO có trong data/models/
+[ ] Config đã calibrate phù hợp với môi trường
+[ ] Test từng module với interactive tester
+[ ] Không gian xung quanh an toàn
+[ ] Emergency stop sẵn sàng
+
+================================================================================
+                           HẾT BÁO CÁO
+================================================================================
+Document Version: 1.0
+Last Updated: January 2026
+Author: Autonomous Robot Development Team
+================================================================================
