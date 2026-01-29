@@ -1,0 +1,10 @@
+{
+   "scanline_ratio": 0.75,
+   "depth_min": 0.2,
+   "depth_max": 4.0,
+   "smooth_kernel": 5,
+   "bump_threshold": 0.03,
+   "hole_threshold": 0.03,
+   "min_obstacle_width": 10,
+   "neighbor_window": 30
+}

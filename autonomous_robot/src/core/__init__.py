@@ -1,0 +1,137 @@
+"""
+Core module for Autonomous Robot.
+Contains configuration and utility functions.
+"""
+
+from .config import (
+    # Paths
+    PROJECT_ROOT,
+    CONFIG_DIR,
+    DATA_DIR,
+    MODELS_DIR,
+    CALIBRATION_DIR,
+    
+    # Camera
+    CAMERA_WIDTH,
+    CAMERA_HEIGHT,
+    CAMERA_FPS,
+    CAMERA_OFFSET_X,
+    
+    # Camera Calibration
+    CAMERA_INTRINSIC_ENABLED,
+    CAMERA_MATRIX,
+    DISTORTION_COEFFICIENTS,
+    REPROJECTION_ERROR,
+    
+    # ROI
+    ROI_TOP_LEFT_X,
+    ROI_TOP_RIGHT_X,
+    ROI_BOTTOM_LEFT_X,
+    ROI_BOTTOM_RIGHT_X,
+    ROI_TOP_Y,
+    ROI_BOTTOM_Y,
+    
+    # Lane Detection
+    WHITE_HLS_LOW,
+    WHITE_HLS_HIGH,
+    YELLOW_HLS_LOW,
+    YELLOW_HLS_HIGH,
+    BLACK_THRESHOLD,
+    MORPH_KERNEL_SIZE,
+    MORPH_CLOSE_ITERATIONS,
+    MORPH_OPEN_ITERATIONS,
+    CANNY_LOW_THRESHOLD,
+    CANNY_HIGH_THRESHOLD,
+    HOUGH_RHO,
+    HOUGH_THETA_DEGREES,
+    HOUGH_THRESHOLD,
+    HOUGH_MIN_LINE_LENGTH,
+    HOUGH_MAX_LINE_GAP,
+    LEFT_LANE_X_MIN,
+    LEFT_LANE_X_MAX,
+    CENTER_LANE_X_MIN,
+    CENTER_LANE_X_MAX,
+    RIGHT_LANE_X_MIN,
+    RIGHT_LANE_X_MAX,
+    POLY_ORDER,
+    MIN_POINTS_FOR_FIT,
+    LOOK_AHEAD_DISTANCE,
+    MIN_LANE_CONFIDENCE,
+    
+    # Object Detection
+    YOLO_MODEL_PATH,
+    YOLO_CONFIDENCE_THRESHOLD,
+    YOLO_NMS_THRESHOLD,
+    DETECT_CLASSES,
+    
+    # Depth
+    DEPTH_MEDIAN_FILTER_SIZE,
+    DEPTH_MIN_VALID,
+    DEPTH_MAX_VALID,
+    
+    # Depth Calibration
+    DEPTH_CORRECTION_FACTOR,
+    DEPTH_OFFSET,
+    DEPTH_CALIBRATION_ENABLED,
+    
+    # Obstacle
+    D_SAFE,
+    D_EMERGENCY,
+    OBSTACLE_LEFT_THRESHOLD,
+    OBSTACLE_RIGHT_THRESHOLD,
+    
+    # State Machine
+    LANE_TRANSITION_HYSTERESIS,
+    OBSTACLE_CLEAR_FRAMES,
+    
+    # Motion Control
+    PID_KP,
+    PID_KI,
+    PID_KD,
+    PID_OUTPUT_MIN,
+    PID_OUTPUT_MAX,
+    PID_INTEGRAL_LIMIT,
+    SPEED_MAX,
+    SPEED_MIN,
+    SPEED_NORMAL,
+    SPEED_SLOW,
+    CURVATURE_HIGH_THRESHOLD,
+    CURVATURE_LOW_THRESHOLD,
+    MAX_VELOCITY_CHANGE_RATE,
+    MAX_YAW_CHANGE_RATE,
+    
+    # UART
+    UART_PORT,
+    UART_BAUDRATE,
+    UART_BYTESIZE,
+    UART_PARITY,
+    UART_STOPBITS,
+    UART_TIMEOUT,
+    UART_COMMAND_RATE_HZ,
+    
+    # Robot
+    LEG_HEIGHT,
+    
+    # System
+    MAIN_LOOP_RATE_HZ,
+    LOG_LEVEL,
+    
+    # Functions
+    load_config,
+    validate_config,
+    print_config,
+    ConfigLoader,
+)
+
+__all__ = [
+    'PROJECT_ROOT', 'CONFIG_DIR', 'DATA_DIR', 'MODELS_DIR', 'CALIBRATION_DIR',
+    'CAMERA_WIDTH', 'CAMERA_HEIGHT', 'CAMERA_FPS',
+    'ROI_TOP_LEFT_X', 'ROI_TOP_RIGHT_X', 'ROI_BOTTOM_LEFT_X', 'ROI_BOTTOM_RIGHT_X',
+    'ROI_TOP_Y', 'ROI_BOTTOM_Y',
+    'YOLO_MODEL_PATH', 'YOLO_CONFIDENCE_THRESHOLD', 'YOLO_NMS_THRESHOLD', 'DETECT_CLASSES',
+    'D_SAFE', 'D_EMERGENCY',
+    'PID_KP', 'PID_KI', 'PID_KD',
+    'SPEED_MAX', 'SPEED_MIN', 'SPEED_NORMAL', 'SPEED_SLOW',
+    'MAIN_LOOP_RATE_HZ', 'LOG_LEVEL', 'LEG_HEIGHT',
+    'load_config', 'validate_config', 'print_config', 'ConfigLoader',
+]
